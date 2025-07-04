@@ -1,0 +1,49 @@
+services:
+  db:
+    image: postgres:15
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: postgres
+      POSTGRES_MAX_CONNECTIONS: 100
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data  # Referencia al volumen
+      - ./data:/var/lib/postgresql/datafiles
+
+  backend:
+    build: .
+    depends_on:
+      db:
+        condition: service_healthy
+    volumes:
+      - .:/app
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+
+  pgadmin:
+    image: dpage/pgadmin4
+    container_name: pgadmin_container
+    restart: always
+    ports:
+      - "5050:80"  # Mapea el puerto 5050 de tu host al puerto 80 del contenedor
+    environment:
+      PGADMIN_DEFAULT_EMAIL: ${PGADMIN_DEFAULT_EMAIL} # Referencia la variable del .env
+      PGADMIN_DEFAULT_PASSWORD: ${PGADMIN_DEFAULT_PASSWORD}
+    volumes:
+      - pgadmin_data:/var/lib/pgadmin # Persiste los datos de pgAdmin
+      - ./data:/var/lib/pgadmin/datos
+    env_file:
+      - .env
+# ¡Añade esto al final del archivo!
+volumes:
+  postgres_data:  # Declaración del volumen nombrado
+  pgadmin_data:
