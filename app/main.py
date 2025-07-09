@@ -13,8 +13,27 @@ from .database import SessionLocal, engine, Base
 from .db_utils import create_tables
 # Importar el modelo ObrasMedicion desde models.py
 from .models import ObrasMedicion
+from pyproj import Transformer
 
 app = FastAPI()
+
+
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi import FastAPI
+
+origins = [
+    "http://localhost:4321",
+]
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=origins,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
 
 @app.on_event("startup")
 def on_startup():
@@ -38,9 +57,12 @@ async def get_obras_count():
     finally:
         db.close()
 
-@app.get("/ubicaciones", summary="Obtiene todas las regiones, cuencas y subcuencas con sus códigos y nombres")
-async def get_ubicaciones():
+@app.get("/cuencas", summary="Obtiene todas las regiones, cuencas y subcuencas con sus códigos y nombres")
+async def get_cuencas():
     db = SessionLocal()
+
+    print('ENTRE A CUENCAS')
+
     try:
         results = db.query(
             ObrasMedicion.region,
@@ -50,16 +72,16 @@ async def get_ubicaciones():
             ObrasMedicion.cod_subcuenca
         ).distinct().all()
 
-        ubicaciones = []
+        cuencas = []
         for r in results:
-            ubicaciones.append({
+            cuencas.append({
                 "cod_region": r.region,
                 "nom_cuenca": r.nom_cuenca,
                 "cod_cuenca": r.cod_cuenca,
                 "nom_subcuenca": r.nom_subcuenca,
                 "cod_subcuenca": r.cod_subcuenca
             })
-        return ubicaciones
+        return cuencas
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
     finally:
@@ -70,9 +92,13 @@ async def get_coordenadas_unicas(
     region: Optional[int] = Query(None, description="Filtrar por código de Región"),
     cod_cuenca: Optional[int] = Query(None, description="Filtrar por código de cuenca"),
     cod_subcuenca: Optional[int] = Query(None, description="Filtrar por código de subcuenca"),
-    limit: Optional[int] = Query(120, description="Cantidad máxima de coordenadas únicas a retornar")
+    limit: Optional[int] = Query(120, description="Cantidad máxima de coordenadas únicas a retornar"),
+    filtro_null_subcuenca: Optional[int] = Query(None),
 ):
-    db = SessionLocal()
+    db: Session = SessionLocal()
+
+    print('ENTRE A COORDENADAS UNICAS')
+
     try:
         query = db.query(
             ObrasMedicion.nom_cuenca,
@@ -80,7 +106,8 @@ async def get_coordenadas_unicas(
             ObrasMedicion.comuna,
             ObrasMedicion.utm_norte,
             ObrasMedicion.utm_este,
-            ObrasMedicion.huso # Asumiendo que 'huso' se necesita para "coordenadas normales" o transformación
+            ObrasMedicion.huso,
+            ObrasMedicion.cod_subcuenca
         ).distinct(
             ObrasMedicion.utm_norte,
             ObrasMedicion.utm_este
@@ -90,29 +117,42 @@ async def get_coordenadas_unicas(
             query = query.filter(ObrasMedicion.region == region)
         if cod_cuenca is not None:
             query = query.filter(ObrasMedicion.cod_cuenca == cod_cuenca)
-        if cod_subcuenca is not None:
+        if filtro_null_subcuenca:
+            query = query.filter(ObrasMedicion.cod_subcuenca.is_(None))
+        elif cod_subcuenca is not None:
             query = query.filter(ObrasMedicion.cod_subcuenca == cod_subcuenca)
 
-        # Limitar la cantidad de resultados únicos
+
         results = query.limit(limit).all()
+
+        # Convertir de UTM a lat/lon usando pyproj
+        transformer = Transformer.from_crs("epsg:32719", "epsg:4326", always_xy=True)
 
         coordenadas = []
         for r in results:
+            try:
+                lon, lat = transformer.transform(r.utm_este, r.utm_norte)
+            except Exception:
+                lon, lat = None, None
+
             coordenadas.append({
-                "nombre_cuenca": r.nom_cuenca,
-                "nombre_subcuenca": r.nom_subcuenca,
-                "comuna": r.comuna,
+                "lat": lat,
+                "lon": lon,
                 "utm_norte": r.utm_norte,
                 "utm_este": r.utm_este,
-                "huso_utm": r.huso,
-                # Aquí podrías añadir una lógica para "coordenadas normales" si se refiere a lat/lon
-                # Por ahora, se devuelven las UTM.
+                "nombre_cuenca": r.nom_cuenca or "No existe registro",
+                "nombre_subcuenca": r.nom_subcuenca or "No existe registro",
+                "comuna": r.comuna or "No existe registro",
+                "cod_subcuenca": r.cod_subcuenca,
             })
+
         return coordenadas
+
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
     finally:
         db.close()
+
 
 
 @app.get("/analisis_cuenca", summary="Realiza un análisis estadístico de caudal por cuenca")

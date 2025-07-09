@@ -9,3 +9,5 @@ python-multipart==0.0.6
 requests==2.32.4
 requests-toolbelt==1.0.0
 tqdm==4.67.1
+utm==0.7.0
+pyproj
