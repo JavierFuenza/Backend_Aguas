@@ -61,8 +61,6 @@ async def get_obras_count():
 async def get_cuencas():
     db = SessionLocal()
 
-    print('ENTRE A CUENCAS')
-
     try:
         results = db.query(
             ObrasMedicion.region,
@@ -97,8 +95,6 @@ async def get_coordenadas_unicas(
 ):
     db: Session = SessionLocal()
 
-    print('ENTRE A COORDENADAS UNICAS')
-
     try:
         query = db.query(
             ObrasMedicion.nom_cuenca,
@@ -107,7 +103,8 @@ async def get_coordenadas_unicas(
             ObrasMedicion.utm_norte,
             ObrasMedicion.utm_este,
             ObrasMedicion.huso,
-            ObrasMedicion.cod_subcuenca
+            ObrasMedicion.cod_subcuenca,
+            ObrasMedicion.cod_cuenca
         ).distinct(
             ObrasMedicion.utm_norte,
             ObrasMedicion.utm_este
@@ -143,6 +140,7 @@ async def get_coordenadas_unicas(
                 "nombre_cuenca": r.nom_cuenca or "No existe registro",
                 "nombre_subcuenca": r.nom_subcuenca or "No existe registro",
                 "comuna": r.comuna or "No existe registro",
+                "cod_cuenca": r.cod_cuenca,
                 "cod_subcuenca": r.cod_subcuenca,
             })
 
