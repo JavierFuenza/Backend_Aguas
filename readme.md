@@ -19,6 +19,10 @@ Para detener los servicios:
 
     docker compose down
 
+Para eliminar los volumenes:
+
+    docker compose down -v
+
 Para reiniciar servicios (En caso de utilizar ctrl-c)
 
     docker compose restart

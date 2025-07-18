@@ -75,7 +75,7 @@ async def get_coordenadas_unicas(
     cod_cuenca: Optional[int] = Query(None),
     cod_subcuenca: Optional[int] = Query(None),
     limit: Optional[int] = Query(120),
-    filtro_null_subcuenca: Optional[int] = Query(None),
+    filtro_null_subcuenca: Optional[bool] = Query(None, description="Si es True, filtra por subcuenca nula. Ignora 'cod_subcuenca' si es True."),
     caudal_minimo: Optional[float] = Query(None),
     caudal_maximo: Optional[float] = Query(None),
     orden_caudal: Optional[str] = Query("min", description="Orden del caudal promedio: 'min' o 'max'"),
@@ -84,6 +84,8 @@ async def get_coordenadas_unicas(
 
     try:
         # Construir query base con agrupación y promedio de caudal
+        # Selecting all columns needed for the grouping and later processing,
+        # along with the aggregate functions.
         query = db.query(
             ObrasMedicion.nom_cuenca,
             ObrasMedicion.nom_subcuenca,
@@ -102,12 +104,18 @@ async def get_coordenadas_unicas(
             query = query.filter(ObrasMedicion.region == region)
         if cod_cuenca is not None:
             query = query.filter(ObrasMedicion.cod_cuenca == cod_cuenca)
+
+        # Handle subcuenca filtering logic
         if filtro_null_subcuenca:
             query = query.filter(ObrasMedicion.cod_subcuenca.is_(None))
         elif cod_subcuenca is not None:
             query = query.filter(ObrasMedicion.cod_subcuenca == cod_subcuenca)
 
-        # Agrupar por coordenadas únicas
+        # Ensure we only consider records with non-null caudal for averaging and counting.
+        # This filter applied early helps narrow down the dataset before grouping.
+        query = query.filter(ObrasMedicion.caudal.isnot(None))
+
+        # Agrupar por coordenadas únicas y otros atributos para obtener el promedio y conteo por punto
         query = query.group_by(
             ObrasMedicion.nom_cuenca,
             ObrasMedicion.nom_subcuenca,
@@ -119,7 +127,7 @@ async def get_coordenadas_unicas(
             ObrasMedicion.cod_cuenca
         )
 
-        # Filtrar por caudal mínimo y máximo después del promedio
+        # Filtrar por caudal mínimo y máximo después del promedio (HAVING clause)
         if caudal_minimo is not None:
             query = query.having(func.avg(ObrasMedicion.caudal) >= caudal_minimo)
         if caudal_maximo is not None:
@@ -135,12 +143,16 @@ async def get_coordenadas_unicas(
         results = query.limit(limit).all()
 
         # Conversión de coordenadas
+        # Initialize the transformer once outside the loop.
+        # Assuming "epsg:32719" (WGS 84 / UTM zone 19S) is the correct source CRS for your data.
         transformer = Transformer.from_crs("epsg:32719", "epsg:4326", always_xy=True)
         coordenadas = []
         for r in results:
             try:
+                # Perform the transformation
                 lon, lat = transformer.transform(r.utm_este, r.utm_norte)
-            except Exception:
+            except Exception as e:
+                logging.warning(f"Error transforming coordinates {r.utm_este}, {r.utm_norte}: {e}")
                 lon, lat = None, None
 
             coordenadas.append({
@@ -160,10 +172,11 @@ async def get_coordenadas_unicas(
         return coordenadas
 
     except Exception as e:
+        # Log the exception for debugging purposes
+        logging.error(f"Error in get_coordenadas_unicas: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
     finally:
         db.close()
-
 
 @app.get("/cuencas", summary="Obtiene regiones, cuencas y subcuencas únicas",tags=["cuencas"])
 async def get_unique_cuencas():
