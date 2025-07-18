@@ -19,6 +19,11 @@ Para detener los servicios:
 
     docker compose down
 
+Para reiniciar servicios (En caso de utilizar ctrl-c)
+
+    docker compose restart
+    docker compose logs --follow
+
 Para subir archivos csv:
 
 http://localhost:5050

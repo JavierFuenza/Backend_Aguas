@@ -1,5 +1,6 @@
-from fastapi import FastAPI, UploadFile, File, HTTPException, Query, APIRouter
+from fastapi import Body, FastAPI, UploadFile, File, HTTPException, Query, APIRouter
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
 from sqlalchemy import (
     func, insert, Column, Integer, String, Float, BigInteger,
     Boolean, DateTime, Sequence, and_, or_, distinct, case
@@ -20,7 +21,12 @@ from .db_utils import create_tables
 from .models import ObrasMedicion
 
 
-app = FastAPI()
+app = FastAPI(
+    title = "Aguas Claras Backend API",
+    description="Api para manejar el backend de proyecto Aguas Claras",
+    summary="resumen?",
+    version="0.1",
+)
 
 
 
@@ -36,6 +42,9 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+class UTMLocation(BaseModel):
+    utm_norte: int
+    utm_este: int
 
 
 @app.on_event("startup")
@@ -49,7 +58,7 @@ def on_startup():
     logging.info("Tablas creadas exitosamente o ya existentes.")
 
 
-@app.get("/obras/count", summary="Obtiene el número total de registros en la tabla ObrasMedicion")
+@app.get("/count", summary="Obtiene el número total de registros en la tabla ObrasMedicion",tags=["count"])
 async def get_obras_count():
     db = SessionLocal()
     try:
@@ -60,144 +69,7 @@ async def get_obras_count():
     finally:
         db.close()
 
-@app.get("/cuencas", summary="Obtiene regiones, cuencas y subcuencas únicas")
-async def get_unique_cuencas():
-    db: Session = SessionLocal()
-    try:
-        # Subconsulta: promedios por coordenadas únicas (utm_norte)
-        # We still need this subquery to properly get distinct cuenca/subcuenca combinations
-        # based on where data exists.
-        subq = (
-            db.query(
-                ObrasMedicion.utm_norte.label("utm_norte"),
-                ObrasMedicion.nom_cuenca.label("nom_cuenca"),
-                ObrasMedicion.cod_cuenca.label("cod_cuenca"),
-                ObrasMedicion.nom_subcuenca.label("nom_subcuenca"),
-                ObrasMedicion.cod_subcuenca.label("cod_subcuenca"),
-                ObrasMedicion.region.label("cod_region"),
-                func.avg(ObrasMedicion.caudal).label("promedio_caudal")
-            )
-            .filter(ObrasMedicion.caudal != None)
-            .group_by(
-                ObrasMedicion.utm_norte,
-                ObrasMedicion.nom_cuenca,
-                ObrasMedicion.cod_cuenca,
-                ObrasMedicion.nom_subcuenca,
-                ObrasMedicion.cod_subcuenca,
-                ObrasMedicion.region
-            )
-        ).subquery()
-
-        # Lista única de regiones, cuencas y subcuencas
-        cuencas = db.query(
-            subq.c.cod_region,
-            subq.c.nom_cuenca,
-            subq.c.cod_cuenca,
-            subq.c.nom_subcuenca,
-            subq.c.cod_subcuenca
-        ).distinct().all()
-
-        return {
-            "cuencas": [
-                {
-                    "cod_region": r.cod_region,
-                    "nom_cuenca": r.nom_cuenca,
-                    "cod_cuenca": r.cod_cuenca,
-                    "nom_subcuenca": r.nom_subcuenca,
-                    "cod_subcuenca": r.cod_subcuenca
-                } for r in cuencas
-            ]
-        }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-    finally:
-        db.close()
-
-@app.get("/cuencas/stats", summary="Obtiene estadísticas de caudal por cuenca y subcuenca")
-async def get_cuencas_stats():
-    db: Session = SessionLocal()
-
-    try:
-        # Subconsulta: promedios por coordenadas únicas (utm_norte)
-        subq = (
-            db.query(
-                ObrasMedicion.utm_norte.label("utm_norte"),
-                ObrasMedicion.nom_cuenca.label("nom_cuenca"),
-                ObrasMedicion.cod_cuenca.label("cod_cuenca"),
-                ObrasMedicion.nom_subcuenca.label("nom_subcuenca"),
-                ObrasMedicion.cod_subcuenca.label("cod_subcuenca"),
-                ObrasMedicion.region.label("cod_region"),
-                func.avg(ObrasMedicion.caudal).label("promedio_caudal")
-            )
-            .filter(ObrasMedicion.caudal != None)
-            .group_by(
-                ObrasMedicion.utm_norte,
-                ObrasMedicion.nom_cuenca,
-                ObrasMedicion.cod_cuenca,
-                ObrasMedicion.nom_subcuenca,
-                ObrasMedicion.cod_subcuenca,
-                ObrasMedicion.region
-            )
-        ).subquery()
-
-        # Estadísticas globales
-        min_global, max_global = db.query(
-            func.min(subq.c.promedio_caudal),
-            func.max(subq.c.promedio_caudal)
-        ).first()
-
-        total_puntos_unicos = db.query(func.count(subq.c.utm_norte)).scalar()
-
-        # Por cuenca
-        caudal_por_cuenca = db.query(
-            subq.c.nom_cuenca,
-            func.min(subq.c.promedio_caudal).label("avgMin"),
-            func.max(subq.c.promedio_caudal).label("avgMax"),
-            func.count(subq.c.utm_norte).label("puntos")
-        ).group_by(subq.c.nom_cuenca).all()
-
-        # Por subcuenca
-        caudal_por_subcuenca = db.query(
-            subq.c.nom_cuenca,
-            subq.c.nom_subcuenca,
-            func.min(subq.c.promedio_caudal).label("avgMin"),
-            func.max(subq.c.promedio_caudal).label("avgMax"),
-            func.count(subq.c.utm_norte).label("puntos")
-        ).group_by(subq.c.nom_cuenca, subq.c.nom_subcuenca).all()
-
-        return {
-            "estadisticas": {
-                "caudal_global": {
-                    "avgMin": min_global,
-                    "avgMax": max_global,
-                    "total_puntos_unicos": total_puntos_unicos
-                },
-                "caudal_por_cuenca": [
-                    {
-                        "nom_cuenca": c.nom_cuenca,
-                        "avgMin": c.avgMin,
-                        "avgMax": c.avgMax,
-                        "total_puntos": c.puntos
-                    } for c in caudal_por_cuenca
-                ],
-                "caudal_por_subcuenca": [
-                    {
-                        "nom_cuenca": s.nom_cuenca,
-                        "nom_subcuenca": s.nom_subcuenca,
-                        "avgMin": s.avgMin,
-                        "avgMax": s.avgMax,
-                        "total_puntos": s.puntos
-                    } for s in caudal_por_subcuenca
-                ]
-            }
-        }
-
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-    finally:
-        db.close()
-
-@app.get("/coordenadas_unicas", summary="Obtiene coordenadas únicas filtradas con datos importantes")
+@app.get("/puntos", summary="Obtiene coordenadas únicas filtradas con datos importantes",tags=["puntos"])
 async def get_coordenadas_unicas(
     region: Optional[int] = Query(None),
     cod_cuenca: Optional[int] = Query(None),
@@ -293,7 +165,149 @@ async def get_coordenadas_unicas(
         db.close()
 
 
-@app.get("/analisis_cuenca", summary="Realiza un análisis estadístico de caudal por cuenca")
+@app.get("/cuencas", summary="Obtiene regiones, cuencas y subcuencas únicas",tags=["cuencas"])
+async def get_unique_cuencas():
+    db: Session = SessionLocal()
+    try:
+        # Subconsulta: promedios por coordenadas únicas (utm_norte)
+        # We still need this subquery to properly get distinct cuenca/subcuenca combinations
+        # based on where data exists.
+        subq = (
+            db.query(
+                ObrasMedicion.utm_norte.label("utm_norte"),
+                ObrasMedicion.nom_cuenca.label("nom_cuenca"),
+                ObrasMedicion.cod_cuenca.label("cod_cuenca"),
+                ObrasMedicion.nom_subcuenca.label("nom_subcuenca"),
+                ObrasMedicion.cod_subcuenca.label("cod_subcuenca"),
+                ObrasMedicion.region.label("cod_region"),
+                func.avg(ObrasMedicion.caudal).label("promedio_caudal")
+            )
+            .filter(ObrasMedicion.caudal != None)
+            .group_by(
+                ObrasMedicion.utm_norte,
+                ObrasMedicion.nom_cuenca,
+                ObrasMedicion.cod_cuenca,
+                ObrasMedicion.nom_subcuenca,
+                ObrasMedicion.cod_subcuenca,
+                ObrasMedicion.region
+            )
+        ).subquery()
+
+        # Lista única de regiones, cuencas y subcuencas
+        cuencas = db.query(
+            subq.c.cod_region,
+            subq.c.nom_cuenca,
+            subq.c.cod_cuenca,
+            subq.c.nom_subcuenca,
+            subq.c.cod_subcuenca
+        ).distinct().all()
+
+        return {
+            "cuencas": [
+                {
+                    "cod_region": r.cod_region,
+                    "nom_cuenca": r.nom_cuenca,
+                    "cod_cuenca": r.cod_cuenca,
+                    "nom_subcuenca": r.nom_subcuenca,
+                    "cod_subcuenca": r.cod_subcuenca
+                } for r in cuencas
+            ]
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        db.close()
+
+@app.get("/cuencas/stats", summary="Obtiene estadísticas de caudal por cuenca y subcuenca",tags=["cuencas"])
+async def get_cuencas_stats():
+    db: Session = SessionLocal()
+
+    try:
+        # Subconsulta: promedios por coordenadas únicas (utm_norte)
+        subq = (
+            db.query(
+                ObrasMedicion.utm_norte.label("utm_norte"),
+                ObrasMedicion.nom_cuenca.label("nom_cuenca"),
+                ObrasMedicion.cod_cuenca.label("cod_cuenca"),
+                ObrasMedicion.nom_subcuenca.label("nom_subcuenca"),
+                ObrasMedicion.cod_subcuenca.label("cod_subcuenca"),
+                ObrasMedicion.region.label("cod_region"),
+                func.avg(ObrasMedicion.caudal).label("promedio_caudal")
+            )
+            .filter(ObrasMedicion.caudal != None)
+            .group_by(
+                ObrasMedicion.utm_norte,
+                ObrasMedicion.nom_cuenca,
+                ObrasMedicion.cod_cuenca,
+                ObrasMedicion.nom_subcuenca,
+                ObrasMedicion.cod_subcuenca,
+                ObrasMedicion.region
+            )
+        ).subquery()
+
+        # Estadísticas globales
+        min_max_result = db.query(
+            func.min(subq.c.promedio_caudal),
+            func.max(subq.c.promedio_caudal)
+        ).first()
+        if min_max_result is not None:
+            min_global, max_global = min_max_result
+        else:
+            min_global, max_global = None, None
+
+        total_puntos_unicos = db.query(func.count(subq.c.utm_norte)).scalar()
+
+        # Por cuenca
+        caudal_por_cuenca = db.query(
+            subq.c.nom_cuenca,
+            func.min(subq.c.promedio_caudal).label("avgMin"),
+            func.max(subq.c.promedio_caudal).label("avgMax"),
+            func.count(subq.c.utm_norte).label("puntos")
+        ).group_by(subq.c.nom_cuenca).all()
+
+        # Por subcuenca
+        caudal_por_subcuenca = db.query(
+            subq.c.nom_cuenca,
+            subq.c.nom_subcuenca,
+            func.min(subq.c.promedio_caudal).label("avgMin"),
+            func.max(subq.c.promedio_caudal).label("avgMax"),
+            func.count(subq.c.utm_norte).label("puntos")
+        ).group_by(subq.c.nom_cuenca, subq.c.nom_subcuenca).all()
+
+        return {
+            "estadisticas": {
+                "caudal_global": {
+                    "avgMin": min_global,
+                    "avgMax": max_global,
+                    "total_puntos_unicos": total_puntos_unicos
+                },
+                "caudal_por_cuenca": [
+                    {
+                        "nom_cuenca": c.nom_cuenca,
+                        "avgMin": c.avgMin,
+                        "avgMax": c.avgMax,
+                        "total_puntos": c.puntos
+                    } for c in caudal_por_cuenca
+                ],
+                "caudal_por_subcuenca": [
+                    {
+                        "nom_cuenca": s.nom_cuenca,
+                        "nom_subcuenca": s.nom_subcuenca,
+                        "avgMin": s.avgMin,
+                        "avgMax": s.avgMax,
+                        "total_puntos": s.puntos
+                    } for s in caudal_por_subcuenca
+                ]
+            }
+        }
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        db.close()
+
+
+@app.get("/cuencas/analisis_caudal", summary="Realiza un análisis estadístico de caudal por cuenca",tags=["cuencas"])
 async def get_analisis_cuenca(
     cuenca_identificador: str = Query(..., description="Código o nombre de la cuenca")
 ):
@@ -333,7 +347,7 @@ async def get_analisis_cuenca(
         db.close()
 
 
-@app.get("/informantes_por_cuenca", summary="Genera datos para gráficos de barras de informantes por cuenca")
+@app.get("/cuencas/analisis_informantes", summary="Genera datos para gráficos de barras de informantes por cuenca",tags=["cuencas"])
 async def get_informantes_por_cuenca(
     cuenca_identificador: str = Query(..., description="Código o nombre de la cuenca")
 ):
@@ -400,7 +414,7 @@ async def get_informantes_por_cuenca(
         db.close()
 
 
-@app.get("/caudal_por_tiempo_por_cuenca", summary="Obtiene el caudal extraído a lo largo del tiempo para una cuenca específica")
+@app.get("/cuencas/series_de_tiempo/caudal", summary="Obtiene el caudal extraído a lo largo del tiempo para una cuenca específica",tags=["cuencas"])
 async def get_caudal_por_tiempo_por_cuenca(
     cuenca_identificador: str = Query(..., description="Código o nombre de la cuenca"),
     fecha_inicio: Optional[date] = Query(None, description="Fecha de inicio (YYYY-MM-DD) para filtrar mediciones"),
@@ -456,47 +470,53 @@ async def get_caudal_por_tiempo_por_cuenca(
     finally:
         db.close()
 
-@app.get("/punto/estadisticas", summary="Obtiene estadísticas de caudal para un punto UTM específico")
+
+@app.post("/puntos/estadisticas", summary="Obtiene estadísticas de caudal para uno o varios puntos UTM específicos",tags=["puntos"])
 async def get_point_statistics(
-    utm_norte: int = Query(..., description="Coordenada UTM Norte"),  # Changed to int
-    utm_este: int = Query(..., description="Coordenada UTM Este")    # Changed to int
+    locations: List[UTMLocation] = Body(..., description="Lista de puntos UTM (Norte, Este)")
 ):
     db: Session = SessionLocal()
+    results = []
     try:
-        query = db.query(ObrasMedicion)
+        for loc in locations:
+            utm_norte = loc.utm_norte
+            utm_este = loc.utm_este
 
-        # Filtrar por las coordenadas UTM exactas
-        query = query.filter(
-            ObrasMedicion.utm_norte == utm_norte,
-            ObrasMedicion.utm_este == utm_este
-        )
+            query = db.query(ObrasMedicion)
 
-        # Asegurarse de que el caudal no sea nulo para los cálculos
-        query = query.filter(ObrasMedicion.caudal.isnot(None))
+            # Filtrar por las coordenadas UTM exactas
+            query = query.filter(
+                ObrasMedicion.utm_norte == utm_norte,
+                ObrasMedicion.utm_este == utm_este
+            )
 
-        # Calcular estadísticas
-        count = query.count()
-        avg_caudal = query.with_entities(func.avg(ObrasMedicion.caudal)).scalar()
-        min_caudal = query.with_entities(func.min(ObrasMedicion.caudal)).scalar()
-        max_caudal = query.with_entities(func.max(ObrasMedicion.caudal)).scalar()
-        std_caudal = query.with_entities(func.stddev(ObrasMedicion.caudal)).scalar()
+            # Asegurarse de que el caudal no sea nulo para los cálculos
+            query = query.filter(ObrasMedicion.caudal.isnot(None))
 
-        if count == 0:
-            return {
-                "utm_norte": utm_norte,
-                "utm_este": utm_este,
-                "message": "No se encontraron datos de caudal para las coordenadas UTM especificadas."
-            }
+            # Calcular estadísticas
+            count = query.count()
+            avg_caudal = query.with_entities(func.avg(ObrasMedicion.caudal)).scalar()
+            min_caudal = query.with_entities(func.min(ObrasMedicion.caudal)).scalar()
+            max_caudal = query.with_entities(func.max(ObrasMedicion.caudal)).scalar()
+            std_caudal = query.with_entities(func.stddev(ObrasMedicion.caudal)).scalar()
 
-        return {
-            "utm_norte": int(utm_norte),  # Explicitly cast to int
-            "utm_este": int(utm_este),    # Explicitly cast to int
-            "total_registros_con_caudal": count,
-            "caudal_promedio": round(avg_caudal, 2) if avg_caudal is not None else None,
-            "caudal_minimo": round(min_caudal, 2) if min_caudal is not None else None,
-            "caudal_maximo": round(max_caudal, 2) if max_caudal is not None else None,
-            "desviacion_estandar_caudal": round(std_caudal, 2) if std_caudal is not None else None
-        }
+            if count == 0:
+                results.append({
+                    "utm_norte": utm_norte,
+                    "utm_este": utm_este,
+                    "message": "No se encontraron datos de caudal para las coordenadas UTM especificadas."
+                })
+            else:
+                results.append({
+                    "utm_norte": utm_norte,
+                    "utm_este": utm_este,
+                    "total_registros_con_caudal": count,
+                    "caudal_promedio": round(avg_caudal, 2) if avg_caudal is not None else None,
+                    "caudal_minimo": round(min_caudal, 2) if min_caudal is not None else None,
+                    "caudal_maximo": round(max_caudal, 2) if max_caudal is not None else None,
+                    "desviacion_estandar_caudal": round(std_caudal, 2) if std_caudal is not None else None
+                })
+        return results
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
