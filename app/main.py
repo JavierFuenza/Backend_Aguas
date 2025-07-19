@@ -69,6 +69,7 @@ async def get_obras_count():
     finally:
         db.close()
 
+
 @app.get("/puntos", summary="Obtiene coordenadas únicas filtradas con datos importantes",tags=["puntos"])
 async def get_coordenadas_unicas(
     region: Optional[int] = Query(None),
@@ -84,8 +85,7 @@ async def get_coordenadas_unicas(
 
     try:
         # Construir query base con agrupación y promedio de caudal
-        # Selecting all columns needed for the grouping and later processing,
-        # along with the aggregate functions.
+        # Seleccionar nom_inf, a_pat_inf, a_mat_inf
         query = db.query(
             ObrasMedicion.nom_cuenca,
             ObrasMedicion.nom_subcuenca,
@@ -96,7 +96,10 @@ async def get_coordenadas_unicas(
             ObrasMedicion.cod_subcuenca,
             ObrasMedicion.cod_cuenca,
             func.avg(ObrasMedicion.caudal).label("caudal_promedio"),
-            func.count(ObrasMedicion.caudal).label("n_mediciones")
+            func.count(ObrasMedicion.caudal).label("n_mediciones"),
+            ObrasMedicion.nomb_inf, # Incluir nombre
+            ObrasMedicion.a_pat_inf, # Incluir apellido paterno
+            ObrasMedicion.a_mat_inf # Incluir apellido materno
         )
 
         # Filtros básicos
@@ -112,10 +115,10 @@ async def get_coordenadas_unicas(
             query = query.filter(ObrasMedicion.cod_subcuenca == cod_subcuenca)
 
         # Ensure we only consider records with non-null caudal for averaging and counting.
-        # This filter applied early helps narrow down the dataset before grouping.
         query = query.filter(ObrasMedicion.caudal.isnot(None))
 
         # Agrupar por coordenadas únicas y otros atributos para obtener el promedio y conteo por punto
+        # Añadir nomb_inf, a_pat_inf, a_mat_inf al GROUP BY
         query = query.group_by(
             ObrasMedicion.nom_cuenca,
             ObrasMedicion.nom_subcuenca,
@@ -124,7 +127,10 @@ async def get_coordenadas_unicas(
             ObrasMedicion.utm_este,
             ObrasMedicion.huso,
             ObrasMedicion.cod_subcuenca,
-            ObrasMedicion.cod_cuenca
+            ObrasMedicion.cod_cuenca,
+            ObrasMedicion.nomb_inf,
+            ObrasMedicion.a_pat_inf,
+            ObrasMedicion.a_mat_inf
         )
 
         # Filtrar por caudal mínimo y máximo después del promedio (HAVING clause)
@@ -143,17 +149,20 @@ async def get_coordenadas_unicas(
         results = query.limit(limit).all()
 
         # Conversión de coordenadas
-        # Initialize the transformer once outside the loop.
-        # Assuming "epsg:32719" (WGS 84 / UTM zone 19S) is the correct source CRS for your data.
         transformer = Transformer.from_crs("epsg:32719", "epsg:4326", always_xy=True)
         coordenadas = []
         for r in results:
             try:
-                # Perform the transformation
                 lon, lat = transformer.transform(r.utm_este, r.utm_norte)
             except Exception as e:
                 logging.warning(f"Error transforming coordinates {r.utm_este}, {r.utm_norte}: {e}")
                 lon, lat = None, None
+
+            # Construir el nombre completo del informante
+            full_informante_name_parts = [r.nomb_inf, r.a_pat_inf, r.a_mat_inf]
+            full_informante_name = " ".join(filter(None, full_informante_name_parts)).strip()
+            if not full_informante_name:
+                full_informante_name = "Desconocido"
 
             coordenadas.append({
                 "lat": lat,
@@ -166,36 +175,35 @@ async def get_coordenadas_unicas(
                 "cod_cuenca": r.cod_cuenca,
                 "cod_subcuenca": r.cod_subcuenca,
                 "caudal_promedio": round(r.caudal_promedio, 2) if r.caudal_promedio is not None else None,
-                "n_mediciones": r.n_mediciones
+                "n_mediciones": r.n_mediciones,
+                "nombre_informante": full_informante_name # Usar el nombre completo
             })
 
         return coordenadas
 
     except Exception as e:
-        # Log the exception for debugging purposes
         logging.error(f"Error in get_coordenadas_unicas: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
     finally:
         db.close()
-
 @app.get("/cuencas", summary="Obtiene regiones, cuencas y subcuencas únicas",tags=["cuencas"])
 async def get_unique_cuencas():
     db: Session = SessionLocal()
     try:
         # Subconsulta: promedios por coordenadas únicas (utm_norte)
-        # We still need this subquery to properly get distinct cuenca/subcuenca combinations
-        # based on where data exists.
+        # This subquery is crucial for the logic. The indexes on `cod_cuenca`, `nom_cuenca`,
+        # `cod_subcuenca`, `nom_subcuenca`, `region`, and `caudal` will help here.
         subq = (
             db.query(
                 ObrasMedicion.utm_norte.label("utm_norte"),
-                ObrasMedicion.nom_cuenca.label("nom_cuenca"),
-                ObrasMedicion.cod_cuenca.label("cod_cuenca"),
-                ObrasMedicion.nom_subcuenca.label("nom_subcuenca"),
-                ObrasMedicion.cod_subcuenca.label("cod_subcuenca"),
-                ObrasMedicion.region.label("cod_region"),
-                func.avg(ObrasMedicion.caudal).label("promedio_caudal")
+                ObrasMedicion.nom_cuenca.label("nom_cuenca"), #
+                ObrasMedicion.cod_cuenca.label("cod_cuenca"), #
+                ObrasMedicion.nom_subcuenca.label("nom_subcuenca"), #
+                ObrasMedicion.cod_subcuenca.label("cod_subcuenca"), #
+                ObrasMedicion.region.label("cod_region"), #
+                func.avg(ObrasMedicion.caudal).label("promedio_caudal") #
             )
-            .filter(ObrasMedicion.caudal != None)
+            .filter(ObrasMedicion.caudal != None) #
             .group_by(
                 ObrasMedicion.utm_norte,
                 ObrasMedicion.nom_cuenca,
@@ -207,6 +215,8 @@ async def get_unique_cuencas():
         ).subquery()
 
         # Lista única de regiones, cuencas y subcuencas
+        # The `DISTINCT` clause will benefit from the indexes on `cod_region`, `nom_cuenca`, etc.,
+        # as these columns are part of the underlying subquery and are explicitly indexed.
         cuencas = db.query(
             subq.c.cod_region,
             subq.c.nom_cuenca,
@@ -231,12 +241,14 @@ async def get_unique_cuencas():
     finally:
         db.close()
 
+
 @app.get("/cuencas/stats", summary="Obtiene estadísticas de caudal por cuenca y subcuenca",tags=["cuencas"])
 async def get_cuencas_stats():
     db: Session = SessionLocal()
 
     try:
         # Subconsulta: promedios por coordenadas únicas (utm_norte)
+        # Same rationale as get_unique_cuencas: indexes help this subquery significantly.
         subq = (
             db.query(
                 ObrasMedicion.utm_norte.label("utm_norte"),
@@ -247,7 +259,7 @@ async def get_cuencas_stats():
                 ObrasMedicion.region.label("cod_region"),
                 func.avg(ObrasMedicion.caudal).label("promedio_caudal")
             )
-            .filter(ObrasMedicion.caudal != None)
+            .filter(ObrasMedicion.caudal != None) #
             .group_by(
                 ObrasMedicion.utm_norte,
                 ObrasMedicion.nom_cuenca,
@@ -259,6 +271,7 @@ async def get_cuencas_stats():
         ).subquery()
 
         # Estadísticas globales
+        # Aggregations over the subquery also benefit from the optimized subquery.
         min_max_result = db.query(
             func.min(subq.c.promedio_caudal),
             func.max(subq.c.promedio_caudal)
@@ -271,6 +284,7 @@ async def get_cuencas_stats():
         total_puntos_unicos = db.query(func.count(subq.c.utm_norte)).scalar()
 
         # Por cuenca
+        # Grouping by nom_cuenca benefits from its index.
         caudal_por_cuenca = db.query(
             subq.c.nom_cuenca,
             func.min(subq.c.promedio_caudal).label("avgMin"),
@@ -279,6 +293,8 @@ async def get_cuencas_stats():
         ).group_by(subq.c.nom_cuenca).all()
 
         # Por subcuenca
+        # Grouping by nom_cuenca and nom_subcuenca benefits from their indexes,
+        # and potentially from 'idx_cuenca_subcuenca' if the optimizer can use it.
         caudal_por_subcuenca = db.query(
             subq.c.nom_cuenca,
             subq.c.nom_subcuenca,
@@ -328,15 +344,17 @@ async def get_analisis_cuenca(
     try:
         query = db.query(ObrasMedicion.caudal)
 
+        # Filters on `cod_cuenca` or `nom_cuenca` directly use their indexes.
         if cuenca_identificador.isdigit():  # Si es un número, asumir que es un código
-            query = query.filter(ObrasMedicion.cod_cuenca == int(cuenca_identificador))
+            query = query.filter(ObrasMedicion.cod_cuenca == int(cuenca_identificador)) #
         else:  # Si no, asumir que es un nombre
-            query = query.filter(ObrasMedicion.nom_cuenca == cuenca_identificador)
+            query = query.filter(ObrasMedicion.nom_cuenca == cuenca_identificador) #
 
-        # Filtrar registros donde el caudal no es nulo para los cálculos
-        query = query.filter(ObrasMedicion.caudal.isnot(None))
+        # Filtering `caudal.isnot(None)` leverages the `caudal` index.
+        query = query.filter(ObrasMedicion.caudal.isnot(None)) #
 
         # Calcular estadísticas
+        # Aggregations benefit from the filters narrowing down the dataset.
         count = query.count()
         avg_caudal = query.with_entities(func.avg(ObrasMedicion.caudal)).scalar()
         min_caudal = query.with_entities(func.min(ObrasMedicion.caudal)).scalar()
@@ -368,22 +386,25 @@ async def get_informantes_por_cuenca(
     try:
         base_query = db.query(ObrasMedicion)
 
+        # Filtering by cuenca code or name uses the respective indexes.
         if cuenca_identificador.isdigit():
-            base_query = base_query.filter(ObrasMedicion.cod_cuenca == int(cuenca_identificador))
+            base_query = base_query.filter(ObrasMedicion.cod_cuenca == int(cuenca_identificador)) #
         else:
-            base_query = base_query.filter(ObrasMedicion.nom_cuenca == cuenca_identificador)
+            base_query = base_query.filter(ObrasMedicion.nom_cuenca == cuenca_identificador) #
 
         # Agrupación por informante para el conteo de registros
+        # The 'nomb_inf' index supports this GROUP BY.
         informantes_count = base_query.with_entities(
-            ObrasMedicion.nomb_inf,
+            ObrasMedicion.nomb_inf, #
             func.count(ObrasMedicion.id)
-        ).group_by(ObrasMedicion.nomb_inf).all()
+        ).group_by(ObrasMedicion.nomb_inf).all() #
 
         # Agrupación por informante para la suma de caudal total extraído
+        # Filtering `caudal.isnot(None)` and grouping by `nomb_inf` both benefit from indexes.
         informantes_caudal_total = base_query.with_entities(
-            ObrasMedicion.nomb_inf,
-            func.sum(ObrasMedicion.caudal)
-        ).filter(ObrasMedicion.caudal.isnot(None)).group_by(ObrasMedicion.nomb_inf).all()
+            ObrasMedicion.nomb_inf, #
+            func.sum(ObrasMedicion.caudal) #
+        ).filter(ObrasMedicion.caudal.isnot(None)).group_by(ObrasMedicion.nomb_inf).all() #
 
         # Formatear resultados para el gráfico de cantidad de registros
         data_registros = []
@@ -402,10 +423,11 @@ async def get_informantes_por_cuenca(
             })
         
         # Opcional: Contar obras únicas por informante
+        # `nombre_obra` index helps with the distinct count.
         informantes_obras_unicas = base_query.with_entities(
-            ObrasMedicion.nomb_inf,
-            func.count(ObrasMedicion.nombre_obra.distinct())
-        ).group_by(ObrasMedicion.nomb_inf).all()
+            ObrasMedicion.nomb_inf, #
+            func.count(ObrasMedicion.nombre_obra.distinct()) #
+        ).group_by(ObrasMedicion.nomb_inf).all() #
 
         data_obras_unicas = []
         for nom_inf, unique_works_count in informantes_obras_unicas:
@@ -436,28 +458,33 @@ async def get_caudal_por_tiempo_por_cuenca(
     db = SessionLocal()
     try:
         query = db.query(
-            ObrasMedicion.fecha_medicion,
-            ObrasMedicion.caudal
+            ObrasMedicion.fecha_medicion, #
+            ObrasMedicion.caudal #
         )
 
+        # Filtering by cuenca code or name uses the respective indexes.
+        # The composite indexes `idx_cuenca_fecha_medicion` and `idx_nom_cuenca_fecha_medicion`
+        # are designed specifically for these types of queries.
         if cuenca_identificador.isdigit():
-            query = query.filter(ObrasMedicion.cod_cuenca == int(cuenca_identificador))
+            query = query.filter(ObrasMedicion.cod_cuenca == int(cuenca_identificador)) #
         else:
-            query = query.filter(ObrasMedicion.nom_cuenca == cuenca_identificador)
+            query = query.filter(ObrasMedicion.nom_cuenca == cuenca_identificador) #
 
         # Filtrar solo registros con caudal y fecha de medición no nulos
+        # This, in conjunction with the cuenca filter, leverages the composite indexes.
         query = query.filter(
-            ObrasMedicion.caudal.isnot(None),
-            ObrasMedicion.fecha_medicion.isnot(None)
+            ObrasMedicion.caudal.isnot(None), #
+            ObrasMedicion.fecha_medicion.isnot(None) #
         )
 
         if fecha_inicio:
-            query = query.filter(ObrasMedicion.fecha_medicion >= fecha_inicio)
+            query = query.filter(ObrasMedicion.fecha_medicion >= fecha_inicio) #
         if fecha_fin:
-            query = query.filter(ObrasMedicion.fecha_medicion <= fecha_fin)
+            query = query.filter(ObrasMedicion.fecha_medicion <= fecha_fin) #
 
         # Ordenar por fecha para una mejor visualización temporal
-        query = query.order_by(ObrasMedicion.fecha_medicion)
+        # The `fecha_medicion` part of the composite index also helps with ordering.
+        query = query.order_by(ObrasMedicion.fecha_medicion) #
 
         results = query.all()
 
@@ -486,6 +513,7 @@ async def get_caudal_por_tiempo_por_cuenca(
 
 @app.post("/puntos/estadisticas", summary="Obtiene estadísticas de caudal para uno o varios puntos UTM específicos",tags=["puntos"])
 async def get_point_statistics(
+
     locations: List[UTMLocation] = Body(..., description="Lista de puntos UTM (Norte, Este)")
 ):
     db: Session = SessionLocal()
@@ -498,13 +526,15 @@ async def get_point_statistics(
             query = db.query(ObrasMedicion)
 
             # Filtrar por las coordenadas UTM exactas
+            # This directly leverages the `idx_utm_coords` composite index.
             query = query.filter(
-                ObrasMedicion.utm_norte == utm_norte,
-                ObrasMedicion.utm_este == utm_este
+                ObrasMedicion.utm_norte == utm_norte, #
+                ObrasMedicion.utm_este == utm_este #
             )
 
             # Asegurarse de que el caudal no sea nulo para los cálculos
-            query = query.filter(ObrasMedicion.caudal.isnot(None))
+            # This filter also benefits from the `caudal` index.
+            query = query.filter(ObrasMedicion.caudal.isnot(None)) #
 
             # Calcular estadísticas
             count = query.count()
@@ -531,6 +561,66 @@ async def get_point_statistics(
                 })
         return results
 
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        db.close()
+
+
+@app.get("/puntos/series_de_tiempo/caudal", summary="Obtiene el caudal extraído a lo largo del tiempo para un punto UTM específico",tags=["puntos"])
+async def get_caudal_por_tiempo_por_punto(
+    utm_norte: int = Query(..., description="Coordenada UTM Norte del punto"),
+    utm_este: int = Query(..., description="Coordenada UTM Este del punto"),
+    fecha_inicio: Optional[date] = Query(None, description="Fecha de inicio (YYYY-MM-DD) para filtrar mediciones"),
+    fecha_fin: Optional[date] = Query(None, description="Fecha de fin (YYYY-MM-DD) para filtrar mediciones")
+):
+    db = SessionLocal()
+    try:
+        query = db.query(
+            ObrasMedicion.fecha_medicion,
+            ObrasMedicion.caudal
+        )
+
+        # Filtrar por las coordenadas UTM exactas, aprovechando el índice 'idx_utm_coords'
+        query = query.filter(
+            ObrasMedicion.utm_norte == utm_norte,
+            ObrasMedicion.utm_este == utm_este
+        )
+
+        # Filtrar solo registros con caudal y fecha de medición no nulos
+        query = query.filter(
+            ObrasMedicion.caudal.isnot(None),
+            ObrasMedicion.fecha_medicion.isnot(None)
+        )
+
+        if fecha_inicio:
+            query = query.filter(ObrasMedicion.fecha_medicion >= fecha_inicio)
+        if fecha_fin:
+            query = query.filter(ObrasMedicion.fecha_medicion <= fecha_fin)
+
+        # Ordenar por fecha para una mejor visualización temporal
+        query = query.order_by(ObrasMedicion.fecha_medicion)
+
+        results = query.all()
+
+        caudal_por_tiempo = []
+        for fecha, caudal in results:
+            caudal_por_tiempo.append({
+                "fecha_medicion": fecha.isoformat() if fecha else None,
+                "caudal": caudal
+            })
+        
+        if not caudal_por_tiempo:
+            raise HTTPException(status_code=404, detail="No se encontraron datos de caudal para el punto UTM o período especificado.")
+
+        return {
+            "utm_norte": utm_norte,
+            "utm_este": utm_este,
+            "caudal_por_tiempo": caudal_por_tiempo
+        }
+
+    except HTTPException as http_exc:
+        raise http_exc
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
     finally:
