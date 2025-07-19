@@ -186,6 +186,8 @@ async def get_coordenadas_unicas(
         raise HTTPException(status_code=500, detail=str(e))
     finally:
         db.close()
+
+
 @app.get("/cuencas", summary="Obtiene regiones, cuencas y subcuencas únicas",tags=["cuencas"])
 async def get_unique_cuencas():
     db: Session = SessionLocal()
