@@ -513,32 +513,30 @@ async def get_caudal_por_tiempo_por_cuenca(
         db.close()
 
 
-@app.post("/puntos/estadisticas", summary="Obtiene estadísticas de caudal para uno o varios puntos UTM específicos",tags=["puntos"])
-async def get_point_statistics(
+from fastapi import Body, HTTPException
+from sqlalchemy import or_
 
+@app.post("/puntos/estadisticas", summary="Obtiene estadísticas de caudal para uno o varios puntos UTM específicos", tags=["puntos"])
+async def get_point_statistics(
     locations: List[UTMLocation] = Body(..., description="Lista de puntos UTM (Norte, Este)")
 ):
     db: Session = SessionLocal()
-    results = []
     try:
-        for loc in locations:
+        if not locations:
+            raise HTTPException(status_code=400, detail="Debe proporcionar al menos una coordenada UTM")
+
+        # Caso: una sola coordenada → comportamiento original
+        if len(locations) == 1:
+            loc = locations[0]
             utm_norte = loc.utm_norte
             utm_este = loc.utm_este
 
-            query = db.query(ObrasMedicion)
-
-            # Filtrar por las coordenadas UTM exactas
-            # This directly leverages the `idx_utm_coords` composite index.
-            query = query.filter(
-                ObrasMedicion.utm_norte == utm_norte, #
-                ObrasMedicion.utm_este == utm_este #
+            query = db.query(ObrasMedicion).filter(
+                ObrasMedicion.utm_norte == utm_norte,
+                ObrasMedicion.utm_este == utm_este,
+                ObrasMedicion.caudal.isnot(None)
             )
 
-            # Asegurarse de que el caudal no sea nulo para los cálculos
-            # This filter also benefits from the `caudal` index.
-            query = query.filter(ObrasMedicion.caudal.isnot(None)) #
-
-            # Calcular estadísticas
             count = query.count()
             avg_caudal = query.with_entities(func.avg(ObrasMedicion.caudal)).scalar()
             min_caudal = query.with_entities(func.min(ObrasMedicion.caudal)).scalar()
@@ -546,13 +544,13 @@ async def get_point_statistics(
             std_caudal = query.with_entities(func.stddev(ObrasMedicion.caudal)).scalar()
 
             if count == 0:
-                results.append({
+                return [{
                     "utm_norte": utm_norte,
                     "utm_este": utm_este,
                     "message": "No se encontraron datos de caudal para las coordenadas UTM especificadas."
-                })
+                }]
             else:
-                results.append({
+                return [{
                     "utm_norte": utm_norte,
                     "utm_este": utm_este,
                     "total_registros_con_caudal": count,
@@ -560,13 +558,41 @@ async def get_point_statistics(
                     "caudal_minimo": round(min_caudal, 2) if min_caudal is not None else None,
                     "caudal_maximo": round(max_caudal, 2) if max_caudal is not None else None,
                     "desviacion_estandar_caudal": round(std_caudal, 2) if std_caudal is not None else None
-                })
-        return results
+                }]
+
+        # Caso: múltiples coordenadas → análisis conjunto
+        else:
+            # Generar condiciones OR encadenadas para las coordenadas
+            condiciones = [
+                (ObrasMedicion.utm_norte == loc.utm_norte) & (ObrasMedicion.utm_este == loc.utm_este)
+                for loc in locations
+            ]
+
+            query = db.query(ObrasMedicion).filter(
+                or_(*condiciones),
+                ObrasMedicion.caudal.isnot(None)
+            )
+
+            count = query.count()
+            avg_caudal = query.with_entities(func.avg(ObrasMedicion.caudal)).scalar()
+            min_caudal = query.with_entities(func.min(ObrasMedicion.caudal)).scalar()
+            max_caudal = query.with_entities(func.max(ObrasMedicion.caudal)).scalar()
+            std_caudal = query.with_entities(func.stddev(ObrasMedicion.caudal)).scalar()
+
+            return [{
+                "puntos_consultados": len(locations),
+                "total_registros_con_caudal": count,
+                "caudal_promedio": round(avg_caudal, 2) if avg_caudal is not None else None,
+                "caudal_minimo": round(min_caudal, 2) if min_caudal is not None else None,
+                "caudal_maximo": round(max_caudal, 2) if max_caudal is not None else None,
+                "desviacion_estandar_caudal": round(std_caudal, 2) if std_caudal is not None else None
+            }]
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
     finally:
         db.close()
+
 
 
 @app.get("/puntos/series_de_tiempo/caudal", summary="Obtiene el caudal extraído a lo largo del tiempo para un punto UTM específico",tags=["puntos"])
