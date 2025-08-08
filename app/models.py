@@ -1,4 +1,5 @@
-from sqlalchemy import Column, Integer, String, Float, BigInteger, Boolean, DateTime, Identity, Index
+from sqlalchemy import Column, Integer, Date, String, Float, BigInteger, Boolean, DateTime, Identity, Index, ForeignKey, UniqueConstraint
+from sqlalchemy.orm import relationship
 # Importa Base desde el archivo database.py
 from .database import Base
 
@@ -97,4 +98,138 @@ class ObrasMedicion(Base):
         # Composite index for time series queries on cuenca and date
         Index('idx_cuenca_fecha_medicion', 'cod_cuenca', 'fecha_medicion'),
         Index('idx_nom_cuenca_fecha_medicion', 'nom_cuenca', 'fecha_medicion'),
+    )
+
+class DimUbicacion(Base):
+    __tablename__ = 'dim_ubicacion'
+    id_ubicacion = Column(Integer, Identity(), primary_key=True, index=True)
+
+    # Campos de la jerarquía geográfica consolidada
+    region = Column(Integer)
+    provincia = Column(Integer)
+    comuna = Column(Integer)
+    cod_cuenca = Column(Integer)
+    nom_cuenca = Column(String(50))
+    cod_subcuenca = Column(String(20))
+    nom_subcuenca = Column(String(50))
+    cod_subsubcuenca = Column(String(20))
+    nom_subsubcuenca = Column(String(50))
+
+    # Clave foránea a DimAcuifero
+    id_acuifero = Column(Integer, ForeignKey('dim_acuifero.id_acuifero'))
+    
+    # Campos originales de ubicación
+    utm_norte = Column(BigInteger, index=True)
+    utm_este = Column(BigInteger, index=True)
+    huso = Column(Integer)
+    nombre_fuente = Column(String(100))
+    cod_fuente_superficial = Column(String(20))
+    
+    # Relaciones
+    acuifero = relationship("DimAcuifero", back_populates="ubicaciones")
+    caudales = relationship("FactCaudales", back_populates="ubicacion")
+
+    __table_args__ = (
+        # Constraint de unicidad para ubicaciones (requerido para ETL)
+        UniqueConstraint('utm_norte', 'utm_este', 'huso', 'id_acuifero', 
+                        name='uq_dim_ubicacion_coords_acuifero'),
+    )
+
+class DimAcuifero(Base):
+    __tablename__ = 'dim_acuifero'
+    id_acuifero = Column(Integer, Identity(), primary_key=True, index=True)
+    cod_acuifero = Column(String(20), unique=True, index=True)  # UNIQUE constraint añadido para ETL
+    nom_acuifero = Column(String(100), index=True)
+    
+    # Relación uno a muchos con DimUbicacion
+    ubicaciones = relationship("DimUbicacion", back_populates="acuifero")
+
+class DimTiempo(Base):
+    __tablename__ = 'dim_tiempo'
+    id_tiempo = Column(Integer, Identity(), primary_key=True, index=True)
+    fecha_completa = Column(Date, unique=True, index=True)
+    dia = Column(Integer)
+    mes = Column(Integer)
+    ano = Column(Integer)
+    
+    # Relación uno a muchos con FactCaudales
+    caudales = relationship("FactCaudales", back_populates="tiempo")
+
+class DimInformante(Base):
+    __tablename__ = 'dim_informante'
+    id_informante = Column(Integer, Identity(), primary_key=True, index=True)
+    rut_informante = Column(String(12), unique=True)  # Ya tenía UNIQUE
+    tipo_informante = Column(String(50))
+    nombre_informante = Column(String(100), index=True)
+    nacionalidad_informante = Column(String(50))
+    genero_informante = Column(String(20))
+    
+    # Relación uno a muchos con DimObra
+    obras = relationship("DimObra", back_populates="informante")
+
+class DimTipoObra(Base):
+    __tablename__ = 'dim_tipo_obra'
+    id_tipo_obra = Column(Integer, Identity(), primary_key=True, index=True)
+    descripcion = Column(String(50), unique=True)  # Ya tenía UNIQUE
+    
+    # Relación uno a muchos con DimObra
+    obras = relationship("DimObra", back_populates="tipo_obra")
+
+class DimEstadoObra(Base):
+    __tablename__ = 'dim_estado_obra'
+    id_estado_obra = Column(Integer, Identity(), primary_key=True, index=True)
+    descripcion = Column(String(50), unique=True)  # Ya tenía UNIQUE
+    
+    # Relación uno a muchos con DimObra
+    obras = relationship("DimObra", back_populates="estado_obra")
+
+class DimObra(Base):
+    __tablename__ = 'dim_obra'
+    id_obra = Column(Integer, Identity(), primary_key=True, index=True)
+    id_med_obr = Column(BigInteger, unique=True)  # Ya tenía UNIQUE
+    nombre_obra = Column(String(100), index=True)
+    extrae_canal = Column(String(2))
+    apr = Column(String(2))
+    puntoalt = Column(String(2))
+    tiene_motobomba = Column(String(2))
+    tiene_bocatoma = Column(String(2))
+    descarga_cauce_natural = Column(String(2))
+    habilitada = Column(String(2))
+    motivo_deshabilitada = Column(String(100))
+    motivo_otra = Column(String(100))
+    motivo_cambio_estado = Column(String(100))
+    fecha_cambio_estado = Column(DateTime)
+    
+    # Claves foráneas
+    id_informante = Column(Integer, ForeignKey('dim_informante.id_informante'))
+    id_tipo_obra = Column(Integer, ForeignKey('dim_tipo_obra.id_tipo_obra'))
+    id_estado_obra = Column(Integer, ForeignKey('dim_estado_obra.id_estado_obra'))
+    
+    # Relaciones
+    informante = relationship("DimInformante", back_populates="obras")
+    tipo_obra = relationship("DimTipoObra", back_populates="obras")
+    estado_obra = relationship("DimEstadoObra", back_populates="obras")
+    caudales = relationship("FactCaudales", back_populates="obra")
+
+class FactCaudales(Base):
+    __tablename__ = 'fact_caudales'
+    id = Column(Integer, Identity(), primary_key=True, index=True)
+    caudal_m3s = Column(Float)
+    
+    # Claves foráneas a las tablas de dimensión
+    id_ubicacion = Column(Integer, ForeignKey('dim_ubicacion.id_ubicacion'))
+    id_tiempo = Column(Integer, ForeignKey('dim_tiempo.id_tiempo'))
+    id_obra = Column(Integer, ForeignKey('dim_obra.id_obra'))
+    
+    # Relaciones
+    ubicacion = relationship("DimUbicacion", back_populates="caudales")
+    tiempo = relationship("DimTiempo", back_populates="caudales")
+    obra = relationship("DimObra", back_populates="caudales")
+
+    __table_args__ = (
+        # Índice compuesto para optimizar consultas de hechos
+        Index('idx_fact_caudales_composite', 'id_ubicacion', 'id_tiempo', 'id_obra'),
+        # Constraint opcional para evitar duplicados exactos en FactCaudales
+        UniqueConstraint('id_ubicacion', 'id_tiempo', 'id_obra', 
+                        name='uq_fact_caudales_unique_measurement'),
     )
