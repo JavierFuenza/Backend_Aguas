@@ -70,7 +70,7 @@ async def get_obras_count():
         db.close()
 
 
-@app.get("/puntos", summary="Obtiene coordenadas únicas filtradas con datos importantes",tags=["puntos"])
+@app.get("/puntos", summary="Obtiene coordenadas únicas filtradas con datos importantes", tags=["puntos"])
 async def get_coordenadas_unicas(
     region: Optional[int] = Query(None),
     cod_cuenca: Optional[int] = Query(None),
@@ -84,8 +84,15 @@ async def get_coordenadas_unicas(
     db: Session = SessionLocal()
 
     try:
-        # Construir query base con agrupación y promedio de caudal
-        # Seleccionar nom_inf, a_pat_inf, a_mat_inf
+        # Expresión de nombre completo del informante
+        full_name_expr = func.concat_ws(
+            " ",
+            ObrasMedicion.nomb_inf,
+            ObrasMedicion.a_pat_inf,
+            ObrasMedicion.a_mat_inf
+        )
+
+        # Query base con agregaciones
         query = db.query(
             ObrasMedicion.nom_cuenca,
             ObrasMedicion.nom_subcuenca,
@@ -97,28 +104,25 @@ async def get_coordenadas_unicas(
             ObrasMedicion.cod_cuenca,
             func.avg(ObrasMedicion.caudal).label("caudal_promedio"),
             func.count(ObrasMedicion.caudal).label("n_mediciones"),
-            ObrasMedicion.nomb_inf, # Incluir nombre
-            ObrasMedicion.a_pat_inf, # Incluir apellido paterno
-            ObrasMedicion.a_mat_inf # Incluir apellido materno
+            func.avg(ObrasMedicion.altura_limnimetrica).label("altura_promedio"),
+            func.array_agg(func.distinct(full_name_expr)).label("nombres_informantes")
         )
 
-        # Filtros básicos
+        # Filtros
         if region is not None:
             query = query.filter(ObrasMedicion.region == region)
         if cod_cuenca is not None:
             query = query.filter(ObrasMedicion.cod_cuenca == cod_cuenca)
 
-        # Handle subcuenca filtering logic
         if filtro_null_subcuenca:
             query = query.filter(ObrasMedicion.cod_subcuenca.is_(None))
         elif cod_subcuenca is not None:
             query = query.filter(ObrasMedicion.cod_subcuenca == cod_subcuenca)
 
-        # Ensure we only consider records with non-null caudal for averaging and counting.
+        # Solo registros con caudal no nulo
         query = query.filter(ObrasMedicion.caudal.isnot(None))
 
-        # Agrupar por coordenadas únicas y otros atributos para obtener el promedio y conteo por punto
-        # Añadir nomb_inf, a_pat_inf, a_mat_inf al GROUP BY
+        # Group By (sin campos de informante, para poder agregarlos)
         query = query.group_by(
             ObrasMedicion.nom_cuenca,
             ObrasMedicion.nom_subcuenca,
@@ -127,25 +131,22 @@ async def get_coordenadas_unicas(
             ObrasMedicion.utm_este,
             ObrasMedicion.huso,
             ObrasMedicion.cod_subcuenca,
-            ObrasMedicion.cod_cuenca,
-            ObrasMedicion.nomb_inf,
-            ObrasMedicion.a_pat_inf,
-            ObrasMedicion.a_mat_inf
+            ObrasMedicion.cod_cuenca
         )
 
-        # Filtrar por caudal mínimo y máximo después del promedio (HAVING clause)
+        # HAVING por rangos de caudal promedio
         if caudal_minimo is not None:
             query = query.having(func.avg(ObrasMedicion.caudal) >= caudal_minimo)
         if caudal_maximo is not None:
             query = query.having(func.avg(ObrasMedicion.caudal) <= caudal_maximo)
 
-        # Ordenamiento por caudal promedio
+        # Orden
         if orden_caudal == "max":
             query = query.order_by(func.avg(ObrasMedicion.caudal).desc())
-        else:  # por defecto, "min"
+        else:
             query = query.order_by(func.avg(ObrasMedicion.caudal).asc())
 
-        # Aplicar límite
+        # Límite
         results = query.limit(limit).all()
 
         # Conversión de coordenadas
@@ -158,11 +159,9 @@ async def get_coordenadas_unicas(
                 logging.warning(f"Error transforming coordinates {r.utm_este}, {r.utm_norte}: {e}")
                 lon, lat = None, None
 
-            # Construir el nombre completo del informante
-            full_informante_name_parts = [r.nomb_inf, r.a_pat_inf, r.a_mat_inf]
-            full_informante_name = " ".join(filter(None, full_informante_name_parts)).strip()
-            if not full_informante_name:
-                full_informante_name = "Desconocido"
+            nombres_limpios = [n.strip() for n in (r.nombres_informantes or []) if n and n.strip()]
+            if not nombres_limpios:
+                nombres_limpios = ["Desconocido"]
 
             coordenadas.append({
                 "lat": lat,
@@ -176,7 +175,10 @@ async def get_coordenadas_unicas(
                 "cod_subcuenca": r.cod_subcuenca,
                 "caudal_promedio": round(r.caudal_promedio, 2) if r.caudal_promedio is not None else None,
                 "n_mediciones": r.n_mediciones,
-                "nombre_informante": full_informante_name # Usar el nombre completo
+                "tipoPunto": {
+                    "altura": round(r.altura_promedio, 2) if r.altura_promedio is not None else None,
+                    "nombreInformante": nombres_limpios
+                }
             })
 
         return coordenadas
