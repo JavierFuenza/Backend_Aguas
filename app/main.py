@@ -382,7 +382,7 @@ async def get_analisis_cuenca(
         db.close()
 
 
-@app.get("/cuencas/analisis_informantes", summary="Genera datos para gráficos de barras de informantes por cuenca",tags=["cuencas"])
+@app.get("/cuencas/analisis_informantes", summary="Genera datos para gráficos de barras y caudales por cuenca", tags=["cuencas"])
 async def get_informantes_por_cuenca(
     cuenca_identificador: str = Query(..., description="Código o nombre de la cuenca")
 ):
@@ -390,61 +390,83 @@ async def get_informantes_por_cuenca(
     try:
         base_query = db.query(ObrasMedicion)
 
-        # Filtering by cuenca code or name uses the respective indexes.
+        # Filtrar por código o nombre de la cuenca
         if cuenca_identificador.isdigit():
-            base_query = base_query.filter(ObrasMedicion.cod_cuenca == int(cuenca_identificador)) #
+            base_query = base_query.filter(ObrasMedicion.cod_cuenca == int(cuenca_identificador))
         else:
-            base_query = base_query.filter(ObrasMedicion.nom_cuenca == cuenca_identificador) #
+            base_query = base_query.filter(ObrasMedicion.nom_cuenca == cuenca_identificador)
 
-        # Agrupación por informante para el conteo de registros
-        # The 'nomb_inf' index supports this GROUP BY.
+        # --- Gráfico 1: Cantidad de registros por informante ---
         informantes_count = base_query.with_entities(
-            ObrasMedicion.nomb_inf, #
+            ObrasMedicion.nomb_inf,
             func.count(ObrasMedicion.id)
-        ).group_by(ObrasMedicion.nomb_inf).all() #
+        ).group_by(ObrasMedicion.nomb_inf).all()
 
-        # Agrupación por informante para la suma de caudal total extraído
-        # Filtering `caudal.isnot(None)` and grouping by `nomb_inf` both benefit from indexes.
+        data_registros = [
+            {"informante": nom_inf if nom_inf else "Desconocido", "cantidad_registros": count}
+            for nom_inf, count in informantes_count
+        ]
+
+        # --- Gráfico 2: Caudal total por informante ---
         informantes_caudal_total = base_query.with_entities(
-            ObrasMedicion.nomb_inf, #
-            func.sum(ObrasMedicion.caudal) #
-        ).filter(ObrasMedicion.caudal.isnot(None)).group_by(ObrasMedicion.nomb_inf).all() #
+            ObrasMedicion.nomb_inf,
+            func.sum(ObrasMedicion.caudal)
+        ).filter(ObrasMedicion.caudal.isnot(None)).group_by(ObrasMedicion.nomb_inf).all()
 
-        # Formatear resultados para el gráfico de cantidad de registros
-        data_registros = []
-        for nom_inf, count in informantes_count:
-            data_registros.append({
-                "informante": nom_inf if nom_inf else "Desconocido",
-                "cantidad_registros": count
-            })
+        data_caudal = [
+            {"informante": nom_inf if nom_inf else "Desconocido", "caudal_total_extraido": total_caudal or 0}
+            for nom_inf, total_caudal in informantes_caudal_total
+        ]
 
-        # Formatear resultados para el gráfico de caudal total
-        data_caudal = []
-        for nom_inf, total_caudal in informantes_caudal_total:
-            data_caudal.append({
-                "informante": nom_inf if nom_inf else "Desconocido",
-                "caudal_total_extraido": total_caudal if total_caudal else 0
-            })
-        
-        # Opcional: Contar obras únicas por informante
-        # `nombre_obra` index helps with the distinct count.
+        # --- Gráfico 3: Obras únicas por informante ---
         informantes_obras_unicas = base_query.with_entities(
-            ObrasMedicion.nomb_inf, #
-            func.count(ObrasMedicion.nombre_obra.distinct()) #
-        ).group_by(ObrasMedicion.nomb_inf).all() #
+            ObrasMedicion.nomb_inf,
+            func.count(ObrasMedicion.nombre_obra.distinct())
+        ).group_by(ObrasMedicion.nomb_inf).all()
 
-        data_obras_unicas = []
-        for nom_inf, unique_works_count in informantes_obras_unicas:
-            data_obras_unicas.append({
-                "informante": nom_inf if nom_inf else "Desconocido",
-                "cantidad_obras_unicas": unique_works_count
-            })
+        data_obras_unicas = [
+            {"informante": nom_inf if nom_inf else "Desconocido", "cantidad_obras_unicas": unique_works_count}
+            for nom_inf, unique_works_count in informantes_obras_unicas
+        ]
 
+        # --- Gráfico 4: Caudal diario (min, prom, max) ---
+        caudal_diario = base_query.with_entities(
+            func.date(ObrasMedicion.fecha_medicion).label('fecha'),
+            func.min(ObrasMedicion.caudal).label('min_caudal'),
+            func.avg(ObrasMedicion.caudal).label('avg_caudal'),
+            func.max(ObrasMedicion.caudal).label('max_caudal')
+        ).filter(ObrasMedicion.caudal.isnot(None)) \
+         .group_by(func.date(ObrasMedicion.fecha_medicion)) \
+         .order_by(func.date(ObrasMedicion.fecha_medicion)).all()
+
+        data_caudal_diario = [
+            {"fecha": fecha, "min_caudal": min_caudal, "avg_caudal": avg_caudal, "max_caudal": max_caudal}
+            for fecha, min_caudal, avg_caudal, max_caudal in caudal_diario
+        ]
+
+        # --- Gráfico 5: Caudal mensual (min, prom, max) ---
+        caudal_mensual = base_query.with_entities(
+            func.date_trunc('month', ObrasMedicion.fecha_medicion).label('mes'),
+            func.min(ObrasMedicion.caudal).label('min_caudal'),
+            func.avg(ObrasMedicion.caudal).label('avg_caudal'),
+            func.max(ObrasMedicion.caudal).label('max_caudal')
+        ).filter(ObrasMedicion.caudal.isnot(None)) \
+         .group_by(func.date_trunc('month', ObrasMedicion.fecha_medicion)) \
+         .order_by(func.date_trunc('month', ObrasMedicion.fecha_medicion)).all()
+
+        data_caudal_mensual = [
+            {"mes": mes.strftime('%Y-%m'), "min_caudal": min_caudal, "avg_caudal": avg_caudal, "max_caudal": max_caudal}
+            for mes, min_caudal, avg_caudal, max_caudal in caudal_mensual
+        ]
+
+        # --- Retorno ---
         return {
             "cuenca_identificador": cuenca_identificador,
             "grafico_cantidad_registros_por_informante": data_registros,
             "grafico_caudal_total_por_informante": data_caudal,
-            "grafico_cantidad_obras_unicas_por_informante": data_obras_unicas # Nuevo dato para el gráfico
+            "grafico_cantidad_obras_unicas_por_informante": data_obras_unicas,
+            "grafico_caudal_diario_min_prom_max": data_caudal_diario,
+            "grafico_caudal_mensual_min_prom_max": data_caudal_mensual
         }
 
     except Exception as e:
