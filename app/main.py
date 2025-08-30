@@ -572,14 +572,10 @@ async def get_point_statistics(
 
             if count == 0:
                 return [{
-                    "utm_norte": utm_norte,
-                    "utm_este": utm_este,
                     "message": "No se encontraron datos de caudal para las coordenadas UTM especificadas."
                 }]
             else:
                 return [{
-                    "utm_norte": utm_norte,
-                    "utm_este": utm_este,
                     "total_registros_con_caudal": count,
                     "caudal_promedio": round(avg_caudal, 2) if avg_caudal is not None else None,
                     "caudal_minimo": round(min_caudal, 2) if min_caudal is not None else None,
