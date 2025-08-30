@@ -105,6 +105,7 @@ async def get_coordenadas_unicas(
             func.avg(ObrasMedicion.caudal).label("caudal_promedio"),
             func.count(ObrasMedicion.caudal).label("n_mediciones"),
             func.avg(ObrasMedicion.altura_limnimetrica).label("altura_promedio"),
+            func.avg(ObrasMedicion.nivel_freatico).label("nivel_freatico_promedio"),  # 🔹 agregado
             func.array_agg(func.distinct(full_name_expr)).label("nombres_informantes")
         )
 
@@ -122,7 +123,7 @@ async def get_coordenadas_unicas(
         # Solo registros con caudal no nulo
         query = query.filter(ObrasMedicion.caudal.isnot(None))
 
-        # Group By (sin campos de informante, para poder agregarlos)
+        # Group By
         query = query.group_by(
             ObrasMedicion.nom_cuenca,
             ObrasMedicion.nom_subcuenca,
@@ -177,6 +178,7 @@ async def get_coordenadas_unicas(
                 "n_mediciones": r.n_mediciones,
                 "tipoPunto": {
                     "altura": round(r.altura_promedio, 2) if r.altura_promedio is not None else None,
+                    "nivel_freatico": round(r.nivel_freatico_promedio, 2) if r.nivel_freatico_promedio is not None else None,  # 🔹 agregado
                     "nombreInformante": nombres_limpios
                 }
             })
@@ -188,6 +190,7 @@ async def get_coordenadas_unicas(
         raise HTTPException(status_code=500, detail=str(e))
     finally:
         db.close()
+
 
 
 @app.get("/cuencas", summary="Obtiene regiones, cuencas y subcuencas únicas",tags=["cuencas"])
