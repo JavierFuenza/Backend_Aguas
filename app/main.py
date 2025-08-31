@@ -80,11 +80,11 @@ async def get_coordenadas_unicas(
     caudal_minimo: Optional[float] = Query(None),
     caudal_maximo: Optional[float] = Query(None),
     orden_caudal: Optional[str] = Query("min", description="Orden del caudal promedio: 'min' o 'max'"),
+    tipo_punto: Optional[str] = Query(None, description="Filtra por tipo de punto: 'superficial', 'pozo'")
 ):
     db: Session = SessionLocal()
 
     try:
-        # Expresión de nombre completo del informante
         full_name_expr = func.concat_ws(
             " ",
             ObrasMedicion.nomb_inf,
@@ -92,7 +92,6 @@ async def get_coordenadas_unicas(
             ObrasMedicion.a_mat_inf
         )
 
-        # Query base con agregaciones
         query = db.query(
             ObrasMedicion.nom_cuenca,
             ObrasMedicion.nom_subcuenca,
@@ -105,23 +104,33 @@ async def get_coordenadas_unicas(
             func.avg(ObrasMedicion.caudal).label("caudal_promedio"),
             func.count(ObrasMedicion.caudal).label("n_mediciones"),
             func.avg(ObrasMedicion.altura_limnimetrica).label("altura_promedio"),
-            func.avg(ObrasMedicion.nivel_freatico).label("nivel_freatico_promedio"),  # 🔹 agregado
+            func.avg(ObrasMedicion.nivel_freatico).label("nivel_freatico_promedio"),
             func.array_agg(func.distinct(full_name_expr)).label("nombres_informantes")
         )
 
-        # Filtros
+        # Filtros generales
         if region is not None:
             query = query.filter(ObrasMedicion.region == region)
         if cod_cuenca is not None:
             query = query.filter(ObrasMedicion.cod_cuenca == cod_cuenca)
-
         if filtro_null_subcuenca:
             query = query.filter(ObrasMedicion.cod_subcuenca.is_(None))
         elif cod_subcuenca is not None:
             query = query.filter(ObrasMedicion.cod_subcuenca == cod_subcuenca)
 
-        # Solo registros con caudal no nulo
         query = query.filter(ObrasMedicion.caudal.isnot(None))
+
+        # 🔹 Filtro por tipo de punto
+        if tipo_punto == "superficial":
+            query = query.filter(
+                ObrasMedicion.altura_limnimetrica.isnot(None),
+                ObrasMedicion.nivel_freatico.is_(None)
+            )
+        elif tipo_punto == "pozo":
+            query = query.filter(
+                ObrasMedicion.altura_limnimetrica.is_(None),
+                ObrasMedicion.nivel_freatico.isnot(None)
+            )
 
         # Group By
         query = query.group_by(
@@ -147,10 +156,9 @@ async def get_coordenadas_unicas(
         else:
             query = query.order_by(func.avg(ObrasMedicion.caudal).asc())
 
-        # Límite
         results = query.limit(limit).all()
 
-        # Conversión de coordenadas
+        # Conversión de coordenadas y armado del resultado
         transformer = Transformer.from_crs("epsg:32719", "epsg:4326", always_xy=True)
         coordenadas = []
         for r in results:
@@ -178,7 +186,7 @@ async def get_coordenadas_unicas(
                 "n_mediciones": r.n_mediciones,
                 "tipoPunto": {
                     "altura": round(r.altura_promedio, 2) if r.altura_promedio is not None else None,
-                    "nivel_freatico": round(r.nivel_freatico_promedio, 2) if r.nivel_freatico_promedio is not None else None,  # 🔹 agregado
+                    "nivel_freatico": round(r.nivel_freatico_promedio, 2) if r.nivel_freatico_promedio is not None else None,
                     "nombreInformante": nombres_limpios
                 }
             })
@@ -190,8 +198,6 @@ async def get_coordenadas_unicas(
         raise HTTPException(status_code=500, detail=str(e))
     finally:
         db.close()
-
-
 
 @app.get("/cuencas", summary="Obtiene regiones, cuencas y subcuencas únicas",tags=["cuencas"])
 async def get_unique_cuencas():
