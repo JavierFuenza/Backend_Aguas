@@ -80,7 +80,7 @@ async def get_coordenadas_unicas(
     caudal_minimo: Optional[float] = Query(None),
     caudal_maximo: Optional[float] = Query(None),
     orden_caudal: Optional[str] = Query("min", description="Orden del caudal promedio: 'min' o 'max'"),
-    tipo_punto: Optional[str] = Query(None, description="Filtra por tipo de punto: 'superficial', 'subterraneo'")
+    tipo_punto: Optional[str] = Query(None, description="Filtra por tipo de punto: 'superficial', 'subterraneo', 'sin_clasificar'")
 ):
     db: Session = SessionLocal()
 
@@ -123,13 +123,16 @@ async def get_coordenadas_unicas(
         # 🔹 Filtro por tipo de punto
         if tipo_punto == "superficial":
             query = query.filter(
-                ObrasMedicion.altura_limnimetrica.isnot(None),
-                ObrasMedicion.nivel_freatico.is_(None)
+                ObrasMedicion.altura_limnimetrica.isnot(None)
             )
         elif tipo_punto == "subterraneo":
             query = query.filter(
-                ObrasMedicion.altura_limnimetrica.is_(None),
                 ObrasMedicion.nivel_freatico.isnot(None)
+            )
+        elif tipo_punto == "sin_clasificar":
+            query = query.filter(
+                ObrasMedicion.altura_limnimetrica.is_(None),
+                ObrasMedicion.nivel_freatico.is_(None)
             )
 
         # Group By
