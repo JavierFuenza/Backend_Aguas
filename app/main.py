@@ -80,11 +80,53 @@ async def get_coordenadas_unicas(
     caudal_minimo: Optional[float] = Query(None),
     caudal_maximo: Optional[float] = Query(None),
     orden_caudal: Optional[str] = Query("min", description="Orden del caudal promedio: 'min' o 'max'"),
-    tipo_punto: Optional[str] = Query(None, description="Filtra por tipo de punto: 'superficial', 'subterraneo', 'sin_clasificar'")
+    tipo_punto: Optional[str] = Query(None, description="Filtra por tipo de punto: 'superficial', 'subterraneo', 'sin_clasificar'"),
+    fecha_inicio: Optional[str] = Query(None, description="Fecha de inicio en formato MM-YYYY"),
+    fecha_fin: Optional[str] = Query(None, description="Fecha de fin en formato MM-YYYY")
 ):
     db: Session = SessionLocal()
 
     try:
+        # Parsear fechas si se proporcionan
+        fecha_inicio_dt = None
+        fecha_fin_dt = None
+
+        # Parsear y validar fechas
+        import calendar
+
+        if fecha_inicio:
+            parts = fecha_inicio.split("-")
+            if len(parts) != 2:
+                raise HTTPException(status_code=400, detail="fecha_inicio: Formato debe ser MM-YYYY")
+            try:
+                mes, anio = int(parts[0]), int(parts[1])
+            except ValueError:
+                raise HTTPException(status_code=400, detail="fecha_inicio: Mes y año deben ser números")
+            if mes < 1 or mes > 12:
+                raise HTTPException(status_code=400, detail="fecha_inicio: Mes debe estar entre 1 y 12")
+            if anio < 1900 or anio > 9999:
+                raise HTTPException(status_code=400, detail="fecha_inicio: Año debe estar entre 1900 y 9999")
+            fecha_inicio_dt = datetime(anio, mes, 1)
+
+        if fecha_fin:
+            parts = fecha_fin.split("-")
+            if len(parts) != 2:
+                raise HTTPException(status_code=400, detail="fecha_fin: Formato debe ser MM-YYYY")
+            try:
+                mes, anio = int(parts[0]), int(parts[1])
+            except ValueError:
+                raise HTTPException(status_code=400, detail="fecha_fin: Mes y año deben ser números")
+            if mes < 1 or mes > 12:
+                raise HTTPException(status_code=400, detail="fecha_fin: Mes debe estar entre 1 y 12")
+            if anio < 1900 or anio > 9999:
+                raise HTTPException(status_code=400, detail="fecha_fin: Año debe estar entre 1900 y 9999")
+            ultimo_dia = calendar.monthrange(anio, mes)[1]
+            fecha_fin_dt = datetime(anio, mes, ultimo_dia, 23, 59, 59)
+
+        # Validar que fecha_inicio <= fecha_fin
+        if fecha_inicio_dt and fecha_fin_dt and fecha_inicio_dt > fecha_fin_dt:
+            raise HTTPException(status_code=400, detail="fecha_inicio debe ser menor o igual a fecha_fin")
+
         full_name_expr = func.concat_ws(
             " ",
             ObrasMedicion.nomb_inf,
@@ -117,6 +159,12 @@ async def get_coordenadas_unicas(
             query = query.filter(ObrasMedicion.cod_subcuenca.is_(None))
         elif cod_subcuenca is not None:
             query = query.filter(ObrasMedicion.cod_subcuenca == cod_subcuenca)
+
+        # Filtros de fecha
+        if fecha_inicio_dt:
+            query = query.filter(ObrasMedicion.fecha_medicion >= fecha_inicio_dt)
+        if fecha_fin_dt:
+            query = query.filter(ObrasMedicion.fecha_medicion <= fecha_fin_dt)
 
         query = query.filter(ObrasMedicion.caudal.isnot(None))
 
@@ -196,6 +244,8 @@ async def get_coordenadas_unicas(
 
         return coordenadas
 
+    except HTTPException:
+        raise
     except Exception as e:
         logging.error(f"Error in get_coordenadas_unicas: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
@@ -367,10 +417,7 @@ async def get_analisis_cuenca(
             query = query.filter(ObrasMedicion.nom_cuenca == cuenca_identificador) #
 
         # Filtering `caudal.isnot(None)` leverages the `caudal` index.
-        query = query.filter(
-            ObrasMedicion.caudal.isnot(None),
-            ObrasMedicion.fecha_medicion.isnot(None)
-        )
+        query = query.filter(ObrasMedicion.caudal.isnot(None)) #
 
         # Calcular estadísticas
         # Aggregations benefit from the filters narrowing down the dataset.
@@ -577,8 +624,7 @@ async def get_point_statistics(
             query = db.query(ObrasMedicion).filter(
                 ObrasMedicion.utm_norte == utm_norte,
                 ObrasMedicion.utm_este == utm_este,
-                ObrasMedicion.caudal.isnot(None),
-                ObrasMedicion.fecha_medicion.isnot(None)
+                ObrasMedicion.caudal.isnot(None)
             )
 
             count = query.count()
@@ -614,8 +660,7 @@ async def get_point_statistics(
 
             query = db.query(ObrasMedicion).filter(
                 or_(*condiciones),
-                ObrasMedicion.caudal.isnot(None),
-                ObrasMedicion.fecha_medicion.isnot(None)
+                ObrasMedicion.caudal.isnot(None)
             )
 
             count = query.count()
