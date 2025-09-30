@@ -541,6 +541,179 @@ async def get_informantes_por_cuenca(
         db.close()
 
 
+@app.get("/subcuencas/analisis_caudal", summary="Realiza un análisis estadístico de caudal por subcuenca",tags=["subcuencas"])
+async def get_analisis_subcuenca(
+    subcuenca_identificador: Optional[str] = Query(None, description="Código o nombre de la subcuenca. Si es 'sin_registro', filtra subcuencas sin registro"),
+    cuenca_identificador: Optional[str] = Query(None, description="Código o nombre de la cuenca (requerido cuando subcuenca_identificador es 'sin_registro')")
+):
+    db = SessionLocal()
+    try:
+        query = db.query(ObrasMedicion)
+
+        # Caso especial: subcuencas sin registro dentro de una cuenca
+        if subcuenca_identificador == "sin_registro":
+            if not cuenca_identificador:
+                raise HTTPException(status_code=400, detail="cuenca_identificador es requerido cuando subcuenca_identificador='sin_registro'")
+
+            # Filtrar por cuenca y subcuenca nula
+            if cuenca_identificador.isdigit():
+                query = query.filter(ObrasMedicion.cod_cuenca == int(cuenca_identificador))
+            else:
+                query = query.filter(ObrasMedicion.nom_cuenca == cuenca_identificador)
+            query = query.filter(ObrasMedicion.cod_subcuenca.is_(None))
+
+        # Caso normal: subcuenca específica
+        elif subcuenca_identificador:
+            if subcuenca_identificador.isdigit():  # Si es un número, asumir que es un código
+                query = query.filter(ObrasMedicion.cod_subcuenca == int(subcuenca_identificador))
+            else:  # Si no, asumir que es un nombre
+                query = query.filter(ObrasMedicion.nom_subcuenca == subcuenca_identificador)
+        else:
+            raise HTTPException(status_code=400, detail="subcuenca_identificador es requerido")
+
+        # Filtrar por caudal y fecha no nulos
+        query = query.filter(
+            ObrasMedicion.caudal.isnot(None),
+            ObrasMedicion.fecha_medicion.isnot(None)
+        )
+
+        # Calcular estadísticas
+        count = query.count()
+        avg_caudal = query.with_entities(func.avg(ObrasMedicion.caudal)).scalar()
+        min_caudal = query.with_entities(func.min(ObrasMedicion.caudal)).scalar()
+        max_caudal = query.with_entities(func.max(ObrasMedicion.caudal)).scalar()
+        std_caudal = query.with_entities(func.stddev(ObrasMedicion.caudal)).scalar()
+        primera_fecha = query.with_entities(func.min(ObrasMedicion.fecha_medicion)).scalar()
+        ultima_fecha = query.with_entities(func.max(ObrasMedicion.fecha_medicion)).scalar()
+
+        if count == 0:
+            return {"message": "No se encontraron datos de caudal para la subcuenca especificada."}
+
+        return {
+            "subcuenca_identificador": subcuenca_identificador,
+            "total_registros_con_caudal": count,
+            "caudal_promedio": avg_caudal,
+            "caudal_minimo": min_caudal,
+            "caudal_maximo": max_caudal,
+            "desviacion_estandar_caudal": std_caudal,
+            "primera_fecha_medicion": primera_fecha.isoformat() if primera_fecha else None,
+            "ultima_fecha_medicion": ultima_fecha.isoformat() if ultima_fecha else None
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        db.close()
+
+
+@app.get("/subcuencas/analisis_informantes", summary="Genera datos para gráficos de barras y caudales por subcuenca", tags=["subcuencas"])
+async def get_informantes_por_subcuenca(
+    subcuenca_identificador: Optional[str] = Query(None, description="Código o nombre de la subcuenca. Si es 'sin_registro', filtra subcuencas sin registro"),
+    cuenca_identificador: Optional[str] = Query(None, description="Código o nombre de la cuenca (requerido cuando subcuenca_identificador es 'sin_registro')")
+):
+    db = SessionLocal()
+    try:
+        base_query = db.query(ObrasMedicion)
+
+        # Caso especial: subcuencas sin registro dentro de una cuenca
+        if subcuenca_identificador == "sin_registro":
+            if not cuenca_identificador:
+                raise HTTPException(status_code=400, detail="cuenca_identificador es requerido cuando subcuenca_identificador='sin_registro'")
+
+            # Filtrar por cuenca y subcuenca nula
+            if cuenca_identificador.isdigit():
+                base_query = base_query.filter(ObrasMedicion.cod_cuenca == int(cuenca_identificador))
+            else:
+                base_query = base_query.filter(ObrasMedicion.nom_cuenca == cuenca_identificador)
+            base_query = base_query.filter(ObrasMedicion.cod_subcuenca.is_(None))
+
+        # Caso normal: subcuenca específica
+        elif subcuenca_identificador:
+            if subcuenca_identificador.isdigit():
+                base_query = base_query.filter(ObrasMedicion.cod_subcuenca == int(subcuenca_identificador))
+            else:
+                base_query = base_query.filter(ObrasMedicion.nom_subcuenca == subcuenca_identificador)
+        else:
+            raise HTTPException(status_code=400, detail="subcuenca_identificador es requerido")
+
+        # --- Gráfico 1: Cantidad de registros por informante ---
+        informantes_count = base_query.with_entities(
+            ObrasMedicion.nomb_inf,
+            func.count(ObrasMedicion.id)
+        ).group_by(ObrasMedicion.nomb_inf).all()
+
+        data_registros = [
+            {"informante": nom_inf if nom_inf else "Desconocido", "cantidad_registros": count}
+            for nom_inf, count in informantes_count
+        ]
+
+        # --- Gráfico 2: Caudal total por informante ---
+        informantes_caudal_total = base_query.with_entities(
+            ObrasMedicion.nomb_inf,
+            func.sum(ObrasMedicion.caudal)
+        ).filter(ObrasMedicion.caudal.isnot(None)).group_by(ObrasMedicion.nomb_inf).all()
+
+        data_caudal = [
+            {"informante": nom_inf if nom_inf else "Desconocido", "caudal_total_extraido": total_caudal or 0}
+            for nom_inf, total_caudal in informantes_caudal_total
+        ]
+
+        # --- Gráfico 3: Obras únicas por informante ---
+        informantes_obras_unicas = base_query.with_entities(
+            ObrasMedicion.nomb_inf,
+            func.count(ObrasMedicion.nombre_obra.distinct())
+        ).group_by(ObrasMedicion.nomb_inf).all()
+
+        data_obras_unicas = [
+            {"informante": nom_inf if nom_inf else "Desconocido", "cantidad_obras_unicas": unique_works_count}
+            for nom_inf, unique_works_count in informantes_obras_unicas
+        ]
+
+        # --- Gráfico 4: Caudal diario (min, prom, max) ---
+        caudal_diario = base_query.with_entities(
+            func.date(ObrasMedicion.fecha_medicion).label('fecha'),
+            func.min(ObrasMedicion.caudal).label('min_caudal'),
+            func.avg(ObrasMedicion.caudal).label('avg_caudal'),
+            func.max(ObrasMedicion.caudal).label('max_caudal')
+        ).filter(ObrasMedicion.caudal.isnot(None)) \
+         .group_by(func.date(ObrasMedicion.fecha_medicion)) \
+         .order_by(func.date(ObrasMedicion.fecha_medicion)).all()
+
+        data_caudal_diario = [
+            {"fecha": fecha, "min_caudal": min_caudal, "avg_caudal": avg_caudal, "max_caudal": max_caudal}
+            for fecha, min_caudal, avg_caudal, max_caudal in caudal_diario
+        ]
+
+        # --- Gráfico 5: Caudal mensual (min, prom, max) ---
+        caudal_mensual = base_query.with_entities(
+            func.date_trunc('month', ObrasMedicion.fecha_medicion).label('mes'),
+            func.min(ObrasMedicion.caudal).label('min_caudal'),
+            func.avg(ObrasMedicion.caudal).label('avg_caudal'),
+            func.max(ObrasMedicion.caudal).label('max_caudal')
+        ).filter(ObrasMedicion.caudal.isnot(None)) \
+         .group_by(func.date_trunc('month', ObrasMedicion.fecha_medicion)) \
+         .order_by(func.date_trunc('month', ObrasMedicion.fecha_medicion)).all()
+
+        data_caudal_mensual = [
+            {"mes": mes.strftime('%Y-%m'), "min_caudal": min_caudal, "avg_caudal": avg_caudal, "max_caudal": max_caudal}
+            for mes, min_caudal, avg_caudal, max_caudal in caudal_mensual
+        ]
+
+        # --- Retorno ---
+        return {
+            "subcuenca_identificador": subcuenca_identificador,
+            "grafico_cantidad_registros_por_informante": data_registros,
+            "grafico_caudal_total_por_informante": data_caudal,
+            "grafico_cantidad_obras_unicas_por_informante": data_obras_unicas,
+            "grafico_caudal_diario_min_prom_max": data_caudal_diario,
+            "grafico_caudal_mensual_min_prom_max": data_caudal_mensual
+        }
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        db.close()
+
+
 @app.get("/cuencas/series_de_tiempo/caudal", summary="Obtiene el caudal extraído a lo largo del tiempo para una cuenca específica",tags=["cuencas"])
 async def get_caudal_por_tiempo_por_cuenca(
     cuenca_identificador: str = Query(..., description="Código o nombre de la cuenca"),
