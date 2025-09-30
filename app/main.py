@@ -358,7 +358,7 @@ async def get_analisis_cuenca(
 ):
     db = SessionLocal()
     try:
-        query = db.query(ObrasMedicion.caudal)
+        query = db.query(ObrasMedicion)
 
         # Filters on `cod_cuenca` or `nom_cuenca` directly use their indexes.
         if cuenca_identificador.isdigit():  # Si es un número, asumir que es un código
@@ -367,7 +367,10 @@ async def get_analisis_cuenca(
             query = query.filter(ObrasMedicion.nom_cuenca == cuenca_identificador) #
 
         # Filtering `caudal.isnot(None)` leverages the `caudal` index.
-        query = query.filter(ObrasMedicion.caudal.isnot(None)) #
+        query = query.filter(
+            ObrasMedicion.caudal.isnot(None),
+            ObrasMedicion.fecha_medicion.isnot(None)
+        )
 
         # Calcular estadísticas
         # Aggregations benefit from the filters narrowing down the dataset.
@@ -376,6 +379,8 @@ async def get_analisis_cuenca(
         min_caudal = query.with_entities(func.min(ObrasMedicion.caudal)).scalar()
         max_caudal = query.with_entities(func.max(ObrasMedicion.caudal)).scalar()
         std_caudal = query.with_entities(func.stddev(ObrasMedicion.caudal)).scalar()
+        primera_fecha = query.with_entities(func.min(ObrasMedicion.fecha_medicion)).scalar()
+        ultima_fecha = query.with_entities(func.max(ObrasMedicion.fecha_medicion)).scalar()
 
         if count == 0:
             return {"message": "No se encontraron datos de caudal para la cuenca especificada."}
@@ -386,7 +391,9 @@ async def get_analisis_cuenca(
             "caudal_promedio": avg_caudal,
             "caudal_minimo": min_caudal,
             "caudal_maximo": max_caudal,
-            "desviacion_estandar_caudal": std_caudal
+            "desviacion_estandar_caudal": std_caudal,
+            "primera_fecha_medicion": primera_fecha.isoformat() if primera_fecha else None,
+            "ultima_fecha_medicion": ultima_fecha.isoformat() if ultima_fecha else None
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -570,7 +577,8 @@ async def get_point_statistics(
             query = db.query(ObrasMedicion).filter(
                 ObrasMedicion.utm_norte == utm_norte,
                 ObrasMedicion.utm_este == utm_este,
-                ObrasMedicion.caudal.isnot(None)
+                ObrasMedicion.caudal.isnot(None),
+                ObrasMedicion.fecha_medicion.isnot(None)
             )
 
             count = query.count()
@@ -578,6 +586,8 @@ async def get_point_statistics(
             min_caudal = query.with_entities(func.min(ObrasMedicion.caudal)).scalar()
             max_caudal = query.with_entities(func.max(ObrasMedicion.caudal)).scalar()
             std_caudal = query.with_entities(func.stddev(ObrasMedicion.caudal)).scalar()
+            primera_fecha = query.with_entities(func.min(ObrasMedicion.fecha_medicion)).scalar()
+            ultima_fecha = query.with_entities(func.max(ObrasMedicion.fecha_medicion)).scalar()
 
             if count == 0:
                 return [{
@@ -589,7 +599,9 @@ async def get_point_statistics(
                     "caudal_promedio": round(avg_caudal, 2) if avg_caudal is not None else None,
                     "caudal_minimo": round(min_caudal, 2) if min_caudal is not None else None,
                     "caudal_maximo": round(max_caudal, 2) if max_caudal is not None else None,
-                    "desviacion_estandar_caudal": round(std_caudal, 2) if std_caudal is not None else None
+                    "desviacion_estandar_caudal": round(std_caudal, 2) if std_caudal is not None else None,
+                    "primera_fecha_medicion": primera_fecha.isoformat() if primera_fecha else None,
+                    "ultima_fecha_medicion": ultima_fecha.isoformat() if ultima_fecha else None
                 }]
 
         # Caso: múltiples coordenadas → análisis conjunto
@@ -602,7 +614,8 @@ async def get_point_statistics(
 
             query = db.query(ObrasMedicion).filter(
                 or_(*condiciones),
-                ObrasMedicion.caudal.isnot(None)
+                ObrasMedicion.caudal.isnot(None),
+                ObrasMedicion.fecha_medicion.isnot(None)
             )
 
             count = query.count()
@@ -610,6 +623,8 @@ async def get_point_statistics(
             min_caudal = query.with_entities(func.min(ObrasMedicion.caudal)).scalar()
             max_caudal = query.with_entities(func.max(ObrasMedicion.caudal)).scalar()
             std_caudal = query.with_entities(func.stddev(ObrasMedicion.caudal)).scalar()
+            primera_fecha = query.with_entities(func.min(ObrasMedicion.fecha_medicion)).scalar()
+            ultima_fecha = query.with_entities(func.max(ObrasMedicion.fecha_medicion)).scalar()
 
             return [{
                 "puntos_consultados": len(locations),
@@ -617,7 +632,9 @@ async def get_point_statistics(
                 "caudal_promedio": round(avg_caudal, 2) if avg_caudal is not None else None,
                 "caudal_minimo": round(min_caudal, 2) if min_caudal is not None else None,
                 "caudal_maximo": round(max_caudal, 2) if max_caudal is not None else None,
-                "desviacion_estandar_caudal": round(std_caudal, 2) if std_caudal is not None else None
+                "desviacion_estandar_caudal": round(std_caudal, 2) if std_caudal is not None else None,
+                "primera_fecha_medicion": primera_fecha.isoformat() if primera_fecha else None,
+                "ultima_fecha_medicion": ultima_fecha.isoformat() if ultima_fecha else None
             }]
 
     except Exception as e:
